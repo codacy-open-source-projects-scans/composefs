@@ -1,19 +1,8 @@
 /* lcfs
    Copyright (C) 2023 Alexander Larsson <alexl@redhat.com>
 
-   This file is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Lesser General Public License as
-   published by the Free Software Foundation; either version 2.1 of the
-   License, or (at your option) any later version.
-
-   This file is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Lesser General Public License for more details.
-
-   You should have received a copy of the GNU Lesser General Public License
-   along with this program.  If not, see <https://www.gnu.org/licenses/>.  */
-
+   SPDX-License-Identifier: GPL-2.0-or-later OR Apache-2.0
+*/
 #ifndef _LCFS_INTERNAL_H
 #define _LCFS_INTERNAL_H
 
@@ -75,47 +64,13 @@ typedef int errint_t;
 
 #define LCFS_MAX_NAME_LENGTH 255 /* max len of file name excluding NULL */
 
-#define lcfs_u16_to_file(v)                                                    \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint16_t),                  \
-			       "Size of v is not equal to size of uint16_t");  \
-		htole16(v);                                                    \
-	})
-
-#define lcfs_u32_to_file(v)                                                    \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint32_t),                  \
-			       "Size of v is not equal to size of uint32_t");  \
-		htole32(v);                                                    \
-	})
-
-#define lcfs_u64_to_file(v)                                                    \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint64_t),                  \
-			       "Size of v is not equal to size of uint64_t");  \
-		htole64(v);                                                    \
-	})
-
-#define lcfs_u16_from_file(v)                                                  \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint16_t),                  \
-			       "Size of v is not equal to size of uint16_t");  \
-		le16toh(v);                                                    \
-	})
-
-#define lcfs_u32_from_file(v)                                                  \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint32_t),                  \
-			       "Size of v is not equal to size of uint32_t");  \
-		le32toh(v);                                                    \
-	})
-
-#define lcfs_u64_from_file(v)                                                  \
-	({                                                                     \
-		_Static_assert(sizeof(v) == sizeof(uint64_t),                  \
-			       "Size of v is not equal to size of uint64_t");  \
-		le64toh(v);                                                    \
-	})
+/* Alias macros for the generic conversions; we can drop these at some point */
+#define lcfs_u16_to_file(v) (htole16(v))
+#define lcfs_u32_to_file(v) (htole32(v))
+#define lcfs_u64_to_file(v) (htole64(v))
+#define lcfs_u16_from_file(v) (le16toh(v))
+#define lcfs_u32_from_file(v) (le32toh(v))
+#define lcfs_u64_from_file(v) (le64toh(v))
 
 /* In memory representation used to build the file.  */
 
