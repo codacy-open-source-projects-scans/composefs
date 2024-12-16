@@ -564,40 +564,57 @@ int lcfs_compute_fsverity_from_fd(uint8_t *digest, int fd)
 	return lcfs_compute_fsverity_from_content(digest, &_fd, fsverity_read_cb);
 }
 
+// Given a file descriptor, query the kernel for its fsverity digest. It
+// is an error if fsverity is not enabled.
+int lcfs_fd_measure_fsverity(uint8_t *digest, int fd)
+{
+	union {
+		struct fsverity_digest fsv;
+		char buf[sizeof(struct fsverity_digest) + MAX_DIGEST_SIZE];
+	} result;
+
+	// First, ask the kernel if the file already has fsverity; if so we just return
+	// that.
+	result.fsv.digest_size = MAX_DIGEST_SIZE;
+	int res = ioctl(fd, FS_IOC_MEASURE_VERITY, &result);
+	if (res == -1) {
+		if (errno == ENODATA || errno == EOPNOTSUPP || errno == ENOTTY) {
+			// Canonicalize errno
+			errno = ENOVERITY;
+		}
+		return -errno;
+	}
+	// The file has fsverity enabled, but with an unexpected different algorithm (e.g. sha512).
+	// This is going to be a weird corner case.  For now, we error out.
+	if (result.fsv.digest_size != LCFS_DIGEST_SIZE) {
+		return -EWRONGVERITY;
+	}
+
+	memcpy(digest, result.buf + sizeof(struct fsverity_digest), LCFS_DIGEST_SIZE);
+
+	return 0;
+}
+
 // Given a file descriptor, first query the kernel for its fsverity digest.  If
 // it is not available in the kernel, perform an in-memory computation.  The file
 // position will always be reset to zero if needed.
 int lcfs_fd_get_fsverity(uint8_t *digest, int fd)
 {
-	char buf[sizeof(struct fsverity_digest) + MAX_DIGEST_SIZE];
-	struct fsverity_digest *fsv = (struct fsverity_digest *)&buf;
-
-	// First, ask the kernel if the file already has fsverity; if so we just return
-	// that.
-	fsv->digest_size = MAX_DIGEST_SIZE;
-	int res = ioctl(fd, FS_IOC_MEASURE_VERITY, fsv);
-	if (res == -1) {
-		// Under this condition, the file didn't have fsverity enabled or the
-		// kernel doesn't support it at all.  We need to compute it in the current process.
-		if (errno == ENODATA || errno == EOPNOTSUPP || errno == ENOTTY) {
-			// For consistency ensure we start from the beginning.  We could
-			// avoid this by using pread() in the future.
-			if (lseek(fd, 0, SEEK_SET) < 0)
-				return -errno;
-			return lcfs_compute_fsverity_from_fd(digest, fd);
-		}
-		// In this case, we found an unexpected error
-		return -errno;
+	int res = lcfs_fd_measure_fsverity(digest, fd);
+	if (res == 0) {
+		return 0;
 	}
-	// The file has fsverity enabled, but with an unexpected different algorithm (e.g. sha512).
-	// This is going to be a weird corner case.  For now, we error out.
-	if (fsv->digest_size != LCFS_DIGEST_SIZE) {
-		return -EWRONGVERITY;
+	// Under this condition, the file didn't have fsverity enabled or the
+	// kernel doesn't support it at all.  We need to compute it in the current process.
+	if (errno == ENODATA || errno == EOPNOTSUPP || errno == ENOTTY) {
+		// For consistency ensure we start from the beginning.  We could
+		// avoid this by using pread() in the future.
+		if (lseek(fd, 0, SEEK_SET) < 0)
+			return -errno;
+		return lcfs_compute_fsverity_from_fd(digest, fd);
 	}
-
-	memcpy(digest, buf + sizeof(struct fsverity_digest), LCFS_DIGEST_SIZE);
-
-	return 0;
+	// In this case, we found an unexpected error
+	return -errno;
 }
 
 int lcfs_compute_fsverity_from_data(uint8_t *digest, uint8_t *data, size_t data_len)
@@ -674,7 +691,7 @@ int lcfs_fd_enable_fsverity(int fd)
 
 	arg.version = 1;
 	arg.hash_algorithm = FS_VERITY_HASH_ALG_SHA256;
-	arg.block_size = 4096;
+	arg.block_size = FSVERITY_BLOCK_SIZE;
 	arg.salt_size = 0;
 	arg.salt_ptr = 0;
 	arg.sig_size = 0;
@@ -1508,7 +1525,8 @@ struct lcfs_node_s *lcfs_build(int dirfd, const char *fname, int buildflags,
 		return node;
 	}
 
-	dfd = openat(dirfd, fname, O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
+	dfd = openat(dirfd, fname,
+		     O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC, 0);
 	if (dfd < 0) {
 		errsv = errno;
 		goto fail;
@@ -1642,24 +1660,26 @@ int lcfs_node_unset_xattr(struct lcfs_node_s *node, const char *name)
 {
 	ssize_t index = find_xattr(node, name);
 
-	if (index >= 0) {
-		struct lcfs_xattr_s *xattr = &node->xattrs[index];
-		size_t value_len = xattr->value_len;
-		free(xattr->key);
-		free(xattr->value);
-		if (index != (ssize_t)node->n_xattrs - 1)
-			node->xattrs[index] = node->xattrs[node->n_xattrs - 1];
-		node->n_xattrs--;
-		// Note 2*size - to account for worst case alignment
-		if (node->n_xattrs > 0)
-			node->xattr_size -= (2 * LCFS_INODE_XATTRMETA_SIZE - 1) +
-					    strlen(name) + value_len;
-		else
-			node->xattr_size = 0; // If last xattr, remove the overhead too
-		assert(node->xattr_size >= 0);
+	if (index < 0) {
+		errno = ENODATA;
+		return -1;
 	}
 
-	return -1;
+	struct lcfs_xattr_s *xattr = &node->xattrs[index];
+	size_t value_len = xattr->value_len;
+	free(xattr->key);
+	free(xattr->value);
+	if (index != (ssize_t)node->n_xattrs - 1)
+		node->xattrs[index] = node->xattrs[node->n_xattrs - 1];
+	node->n_xattrs--;
+	// Note 2*size - to account for worst case alignment
+	if (node->n_xattrs > 0)
+		node->xattr_size -= (2 * LCFS_INODE_XATTRMETA_SIZE - 1) +
+				    strlen(name) + value_len;
+	else
+		node->xattr_size = 0; // If last xattr, remove the overhead too
+	assert(node->xattr_size >= 0);
+	return 0;
 }
 
 /* Set an extended attribute; If from_external_input is true then we
@@ -1673,7 +1693,7 @@ int lcfs_node_set_xattr_internal(struct lcfs_node_s *node, const char *name,
 	char *k, *v;
 
 	const size_t namelen = strlen(name);
-	if (namelen > XATTR_NAME_MAX) {
+	if (namelen == 0 || namelen > XATTR_NAME_MAX) {
 		errno = ERANGE;
 		return -1;
 	}
@@ -1684,7 +1704,8 @@ int lcfs_node_set_xattr_internal(struct lcfs_node_s *node, const char *name,
 	}
 
 	// Remove any existing value
-	(void)lcfs_node_unset_xattr(node, name);
+	if (lcfs_node_unset_xattr(node, name) < 0 && errno != ENODATA)
+		return -1;
 
 	// Double the xattr metadata size, subtracting 1 to account for worst case alignment.
 	size_t entry_size = (2 * LCFS_INODE_XATTRMETA_SIZE) - 1 + namelen + value_len;
