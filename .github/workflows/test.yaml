@@ -1,0 +1,140 @@
+name: Test
+
+on: [push, pull_request]
+
+permissions:
+  actions: read
+
+jobs:
+  clang-format:
+    # To pick up a newer clang
+    runs-on: ubuntu-24.04
+    name: "clang-format"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo ./hacking/installdeps.sh
+      - name: Configure
+        run: meson setup build --prefix=/usr
+      - name: clang-format
+        run: ninja -C build clang-format-check
+  # This build doesn't enable ASAN, which e.g. makes it easier to use with Rust
+  build:
+    runs-on: ubuntu-latest
+    name: "Build with ASAN"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: sudo ./hacking/installdeps.sh
+      - name: Install fsck.erofs
+        run: sudo apt install erofs-utils
+      - name: Install go-md2man
+        run: sudo apt install go-md2man
+      - name: Configure
+        run: meson setup build --prefix=/usr --werror -Db_sanitize=address,undefined
+      - name: Build
+        run: meson compile -C build
+      - name: Unit tests
+        run: meson test -C build
+      - name: Capture build
+        run: DESTDIR=$(pwd)/instroot meson install -C build && tar -C instroot -czf composefs.tar .
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: composefs.tar
+          path: composefs.tar
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testlog-asan.txt
+          path: build/meson-logs/testlog.txt
+  # This build doesn't enable ASAN, which e.g. makes it easier to use with Rust
+  build-noasan:
+    runs-on: ubuntu-latest
+    name: "Build without ASAN"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: sudo ./hacking/installdeps.sh
+      - name: Configure
+        run: meson setup build --prefix=/usr --werror
+      - name: Build
+        run: meson compile -C build
+      - name: Capture build
+        run: DESTDIR=$(pwd)/instroot meson install -C build && tar -C instroot -czf composefs.tar .
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: composefs-noasan.tar
+          path: composefs.tar
+      - name: Upload log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testlog-noasan.txt
+          path: build/meson-logs/testlog.txt
+  build-baseline:
+    runs-on: ubuntu-latest
+    name: "Build on Ubuntu Focal"
+    container: ubuntu:focal
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update -y
+          ALLOW_MISSING="libfsverity-dev" ./hacking/installdeps.sh
+      - name: Configure
+        run: meson setup build --werror
+      - name: Build
+        # focal's meson is too old for 'meson compile'
+        run: ninja -C build
+  build-latest-clang:
+    runs-on: ubuntu-24.04
+    name: "Build (24.04, clang)"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo ./hacking/installdeps.sh
+      - name: Configure
+        run: env CC=clang meson setup build --werror
+      - name: Build
+        # focal's meson is too old for 'meson compile'
+        run: meson compile -C build
+  integration:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - run: sudo apt-get update -y
+      - name: Install erofs kmod
+        run: sudo apt install linux-modules-extra-$(uname -r)
+      - name: Install dependencies
+        run: sudo apt install libasan6 libubsan1 fsverity
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Download
+        uses: actions/download-artifact@v4
+        with:
+          name: composefs.tar
+      - run: sudo tar -C / -xvf composefs.tar
+      - name: Integration tests
+        run: sudo ./tests/integration.sh
+      - name: Integration tests (fsverity required)
+        run: sudo env WITH_TEMP_VERITY=1 unshare -m ./tests/integration.sh
+  distcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install dependencies
+        run: sudo ./hacking/installdeps.sh
+      - name: Configure
+        run: meson setup build --werror
+      - name: Run make distcheck
+        run: meson dist -C build
